@@ -8,14 +8,18 @@
     <div id="toolbar">
       <span id="status" class="status">Attaching…</span>
       <div class="spacer"></div>
-      <label class="filter-label proto-loader" for="proto-file">
-        <input type="file" id="proto-file" accept=".proto" style="display: none" />
+      <label class="filter-label proto-loader" for="proto-file" title="Select the folder containing your .proto schema (and everything it depends on) — e.g. a buf export output directory">
+        <input type="file" id="proto-file" accept=".proto" multiple webkitdirectory style="display: none" />
         <span id="proto-label">Load .proto</span>
       </label>
       <label class="filter-label">
         <input type="checkbox" id="autoscroll" checked />
         Autoscroll
       </label>
+      <div class="view-toggle" id="view-toggle">
+        <button id="view-tree-btn" class="view-btn active" data-mode="tree">Tree</button>
+        <button id="view-json-btn" class="view-btn" data-mode="json">JSON</button>
+      </div>
       <button id="expand-btn">Expand all</button>
       <button id="collapse-btn">Collapse all</button>
       <button id="clear-btn">Clear</button>
@@ -28,7 +32,6 @@
       </div>
     </div>
 
-    <script src="vendor/protobuf.min.js"></script>
     <script src="panel.js"></script>
   </body>
 </html>

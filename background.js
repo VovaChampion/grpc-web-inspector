@@ -36,6 +36,40 @@ function detachDebugger(tabId) {
   }
 }
 
+function sendCommand(tabId, method, params) {
+  return new Promise((resolve) => {
+    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+      if (chrome.runtime.lastError) {
+        resolve({ error: chrome.runtime.lastError.message });
+      } else {
+        resolve(result || {});
+      }
+    });
+  });
+}
+
+function decodeBody(body, base64Encoded) {
+  try {
+    if (base64Encoded) {
+      const binary = atob(body);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+    return new TextEncoder().encode(body);
+  } catch (e) {
+    return null;
+  }
+}
+
+function parseFramesSafe(bytes) {
+  try {
+    return GrpcWebDecoder.parseFrames(bytes);
+  } catch (e) {
+    return [{ type: "error", message: e.message }];
+  }
+}
+
 function notifyPanel(tabId, message) {
   const port = panelPorts.get(tabId);
   if (port) {
@@ -71,6 +105,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         url: params.request.url,
         httpMethod: params.request.method,
         requestHeaders: params.request.headers,
+        hasPostData: !!params.request.hasPostData,
         wallTime: params.wallTime,
       });
       break;
@@ -96,34 +131,31 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         return;
       }
 
-      chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId: params.requestId }, (result) => {
+      (async () => {
         store.delete(params.requestId);
-        if (chrome.runtime.lastError || !result) {
-          console.warn(
-            "[gRPC-Web Inspector] getResponseBody failed:",
-            chrome.runtime.lastError && chrome.runtime.lastError.message,
-          );
+
+        const [responseResult, requestResult] = await Promise.all([
+          sendCommand(tabId, "Network.getResponseBody", { requestId: params.requestId }),
+          entry.hasPostData
+            ? sendCommand(tabId, "Network.getRequestPostData", { requestId: params.requestId })
+            : Promise.resolve(null),
+        ]);
+
+        if (responseResult.error) {
+          console.warn("[gRPC-Web Inspector] getResponseBody failed:", responseResult.error);
           return;
         }
 
-        let bytes;
-        try {
-          if (result.base64Encoded) {
-            const binary = atob(result.body);
-            bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-          } else {
-            bytes = new TextEncoder().encode(result.body);
-          }
-        } catch (e) {
-          return;
-        }
+        const bytes = decodeBody(responseResult.body, responseResult.base64Encoded);
+        if (!bytes) return;
+        const frames = parseFramesSafe(bytes);
 
-        let frames;
-        try {
-          frames = GrpcWebDecoder.parseFrames(bytes);
-        } catch (e) {
-          frames = [{ type: "error", message: e.message }];
+        let requestFrames = [];
+        if (requestResult && !requestResult.error) {
+          const reqBytes = decodeBody(requestResult.postData, requestResult.base64Encoded);
+          if (reqBytes) requestFrames = parseFramesSafe(reqBytes);
+        } else if (requestResult && requestResult.error) {
+          console.warn("[gRPC-Web Inspector] getRequestPostData failed:", requestResult.error);
         }
 
         notifyPanel(tabId, {
@@ -136,11 +168,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
             contentType: entry.contentType,
             requestHeaders: entry.requestHeaders,
             responseHeaders: entry.responseHeaders,
+            requestFrames,
             frames,
             time: entry.wallTime,
           },
         });
-      });
+      })();
       break;
     }
 

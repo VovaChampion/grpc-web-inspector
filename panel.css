@@ -78,6 +78,12 @@ button:hover {
   background: var(--bg-hover);
   border-color: var(--accent-dim);
 }
+button:disabled {
+  cursor: default;
+  opacity: 0.4;
+  background: transparent;
+  border-color: var(--border);
+}
 
 #layout {
   display: flex;
@@ -314,4 +320,51 @@ details.field-details > summary.field-summary::marker {
 .decode-error {
   color: var(--error);
   font-style: italic;
+}
+
+.view-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.view-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 3px 10px;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 12px;
+}
+.view-btn:hover {
+  background: var(--bg-hover);
+}
+.view-btn.active {
+  background: var(--bg-selected);
+  color: var(--accent);
+}
+.view-btn:not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+
+.json-view {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+.json-key {
+  color: var(--accent);
+}
+.json-string {
+  color: var(--warn);
+}
+.json-number {
+  color: #6ab0f3;
+}
+.json-boolean,
+.json-null {
+  color: var(--accent-dim);
 }

@@ -13,82 +13,147 @@ const collapseBtn = document.getElementById("collapse-btn");
 const autoscrollEl = document.getElementById("autoscroll");
 const protoFileInput = document.getElementById("proto-file");
 const protoLabel = document.getElementById("proto-label");
+const viewToggleEl = document.getElementById("view-toggle");
 
-// Parsed protobuf.Root once a .proto file is loaded, else null (falls back
-// to the schema-less wire-format view everywhere).
-let protoRoot = null;
+// "tree" (word-labeled collapsible tree) or "json" (real JSON syntax)
+let viewMode = "tree";
+
+// JSON view is one flat <pre> block with no <details> to toggle, so
+// Expand/Collapse all only make sense in tree view.
+function updateExpandCollapseAvailability() {
+  const disabled = viewMode !== "tree";
+  expandBtn.disabled = disabled;
+  collapseBtn.disabled = disabled;
+}
+updateExpandCollapseAvailability();
+
+viewToggleEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".view-btn");
+  if (!btn || btn.dataset.mode === viewMode) return;
+  viewMode = btn.dataset.mode;
+  viewToggleEl.querySelectorAll(".view-btn").forEach((b) => b.classList.toggle("active", b === btn));
+  updateExpandCollapseAvailability();
+  const current = calls.find((c) => c.requestId === selectedRequestId);
+  if (current) renderDetail(current);
+});
+
+// protobuf.js compiles its encode/decode functions at runtime via
+// `new Function(...)`, which the extension's normal CSP (script-src 'self')
+// blocks as unsafe-eval. So all actual protobuf.js work (parsing .proto
+// files, decoding messages) happens in a sandboxed page (sandbox.html/.js,
+// which gets its own relaxed CSP) — this bridges to it over postMessage.
+const sandboxFrame = document.createElement("iframe");
+sandboxFrame.src = "sandbox.html";
+sandboxFrame.style.display = "none";
+document.body.appendChild(sandboxFrame);
+
+let protoLoaded = false; // mirrors whether the sandbox has a schema loaded
+let sandboxReadyResolve;
+const sandboxReadyPromise = new Promise((resolve) => {
+  sandboxReadyResolve = resolve;
+});
+let sandboxMsgId = 0;
+const sandboxPending = new Map();
+
+window.addEventListener("message", (event) => {
+  if (event.source !== sandboxFrame.contentWindow) return;
+  const msg = event.data;
+  if (!msg) return;
+  if (msg.type === "sandbox-ready") {
+    sandboxReadyResolve();
+    return;
+  }
+  const pending = sandboxPending.get(msg.id);
+  if (!pending) return;
+  sandboxPending.delete(msg.id);
+  if (msg.ok) pending.resolve(msg.result);
+  else pending.reject(new Error(msg.error || "sandbox error"));
+});
+
+async function callSandbox(cmd, payload) {
+  await sandboxReadyPromise;
+  const id = ++sandboxMsgId;
+  return new Promise((resolve, reject) => {
+    sandboxPending.set(id, { resolve, reject });
+    sandboxFrame.contentWindow.postMessage(Object.assign({ id, cmd }, payload), "*");
+  });
+}
+
+// google/api/*.proto (annotations.proto, http.proto) only define HTTP
+// transcoding *options* on RPC methods (extending google.protobuf.
+// MethodOptions) — never actual message field types. Resolving that extend
+// target needs the full google/protobuf/descriptor.proto, which we don't
+// bundle, so loading them just breaks schema resolution for no benefit here.
+function isIrrelevantAnnotationFile(relativePath) {
+  return /(^|\/)google\/api\/(annotations|http)\.proto$/i.test(relativePath);
+}
+
+// chrome.storage.local is shared across every tab's DevTools panel (each tab
+// gets its own panel.js + sandbox instance with no memory of the others), so
+// persisting the loaded schema here means "load .proto" is a one-time thing
+// rather than a per-tab, per-DevTools-session chore.
+const PROTO_STORAGE_KEY = "grpcWebInspector.protoSchema";
+
+async function applyLoadedSchema(files, skippedCount, sourceLabel) {
+  const { serviceCount, messageCount } = await callSandbox("loadSchema", { files });
+  protoLoaded = true;
+  protoLabel.textContent = `${sourceLabel} (${serviceCount} service${serviceCount === 1 ? "" : "s"}, ${messageCount} message${messageCount === 1 ? "" : "s"})`;
+  protoLabel.title = `Click to load a different .proto schema${skippedCount ? ` — ${skippedCount} file${skippedCount === 1 ? "" : "s"} skipped (google/api/*.proto isn't needed for message decoding)` : ""}`;
+  chrome.storage.local.set({ [PROTO_STORAGE_KEY]: { files, skippedCount, sourceLabel } });
+  // re-render whatever's currently selected so it picks up the new schema
+  const current = calls.find((c) => c.requestId === selectedRequestId);
+  if (current) renderDetail(current);
+}
+
+// Auto-loads whatever schema was last successfully loaded (by this tab or
+// any other), so reopening DevTools doesn't mean re-picking the folder.
+(async function restoreProtoSchema() {
+  try {
+    const stored = await chrome.storage.local.get(PROTO_STORAGE_KEY);
+    const saved = stored[PROTO_STORAGE_KEY];
+    if (!saved || !saved.files || !saved.files.length) return;
+    await applyLoadedSchema(saved.files, saved.skippedCount || 0, saved.sourceLabel || "restored schema");
+  } catch (e) {
+    console.warn("[gRPC-Web Inspector] couldn't restore saved .proto schema:", e.message);
+  }
+})();
 
 protoFileInput.addEventListener("change", async () => {
-  const file = protoFileInput.files[0];
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const parsed = protobuf.parse(text, new protobuf.Root(), { keepCase: true });
-    parsed.root.resolveAll();
-    protoRoot = parsed.root;
-    const serviceCount = countNested(protoRoot, (obj) => obj instanceof protobuf.Service);
-    const messageCount = countNested(protoRoot, (obj) => obj instanceof protobuf.Type);
-    protoLabel.textContent = `${file.name} (${serviceCount} service${serviceCount === 1 ? "" : "s"}, ${messageCount} message${messageCount === 1 ? "" : "s"})`;
-    protoLabel.title = "Click to load a different .proto file";
-    // re-render whatever's currently selected so it picks up the new schema
-    const current = calls.find((c) => c.requestId === selectedRequestId);
-    if (current) renderDetail(current);
-  } catch (e) {
+  const allFiles = Array.from(protoFileInput.files || []);
+  if (!allFiles.length) return;
+
+  // webkitRelativePath is set when a whole folder was picked; falls back to
+  // just the filename for a plain multi-file selection.
+  const relPath = (f) => f.webkitRelativePath || f.name;
+  const protoFiles = allFiles.filter((f) => f.name.toLowerCase().endsWith(".proto"));
+  const selected = protoFiles.filter((f) => !isIrrelevantAnnotationFile(relPath(f)));
+  const skippedCount = protoFiles.length - selected.length;
+
+  if (!selected.length) {
     protoLabel.textContent = "Load .proto";
-    alert("Couldn't parse that .proto file: " + e.message);
+    alert("No usable .proto files found in that selection.");
+    protoFileInput.value = "";
+    return;
+  }
+
+  try {
+    const files = await Promise.all(
+      selected.map(async (f) => ({ name: f.name, relPath: relPath(f), text: await f.text() })),
+    );
+    const sourceLabel = files.length === 1 ? files[0].name : `${files.length} files`;
+    await applyLoadedSchema(files, skippedCount, sourceLabel);
+  } catch (e) {
+    protoLoaded = false;
+    protoLabel.textContent = "Load .proto";
+    alert(
+      "Couldn't parse the selected .proto schema: " +
+        e.message +
+        "\n\nMake sure you selected every .proto file this schema depends on (its whole source folder works best).",
+    );
   } finally {
     protoFileInput.value = "";
   }
 });
-
-function countNested(namespace, predicate) {
-  let count = 0;
-  if (namespace.nestedArray) {
-    for (const obj of namespace.nestedArray) {
-      if (predicate(obj)) count++;
-      count += countNested(obj, predicate);
-    }
-  }
-  return count;
-}
-
-// gRPC-Web calls URLs look like https://host/package.Service/MethodName —
-// match that against the loaded schema to find the exact request/response
-// message types, so decoded fields can show real names instead of numbers.
-function resolveMethodForUrl(url) {
-  if (!protoRoot) return null;
-  let pathname;
-  try {
-    pathname = new URL(url).pathname;
-  } catch (e) {
-    return null;
-  }
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  const serviceName = parts[parts.length - 2];
-  const methodName = parts[parts.length - 1];
-  try {
-    const service = protoRoot.lookupService(serviceName);
-    const method = service.methods[methodName];
-    if (!method) return null;
-    method.resolve();
-    return {
-      serviceName,
-      methodName,
-      requestType: method.resolvedRequestType,
-      responseType: method.resolvedResponseType,
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
-function base64ToBytes(b64) {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
 
 clearBtn.addEventListener("click", () => {
   calls.length = 0;
@@ -306,6 +371,75 @@ function renderFieldTree(fields, depth) {
   return order.map((num) => renderGroupedField(num, groups.get(num), depth)).join("");
 }
 
+// ---- JSON view (used for both schema-decoded and schema-less messages) ----
+
+// Converts one schema-less decoded value into a plain JS value/object, using
+// the same string-vs-nested-message preference as the tree view, so both
+// views agree on what a given byte sequence "is".
+function genericValueToPlain(value) {
+  switch (value.kind) {
+    case "varint":
+      return value.value;
+    case "fixed32":
+      return value.float;
+    case "fixed64":
+      return value.double;
+    case "bytes":
+      if (value.asString !== null) return value.asString;
+      if (value.asMessage && value.asMessage.length) return genericFieldsToPlain(value.asMessage);
+      return `<${value.byteLength} raw bytes: ${value.bytesBase64}>`;
+    default:
+      return null;
+  }
+}
+
+// Converts a schema-less decoded field list (number-keyed, protobuf has no
+// field names without a .proto) into a plain object keyed by "#N", grouping
+// repeated occurrences into arrays — mirrors renderFieldTree's grouping.
+function genericFieldsToPlain(fields) {
+  if (!fields || !fields.length) return {};
+  const order = [];
+  const groups = new Map();
+  for (const f of fields) {
+    if (!groups.has(f.fieldNumber)) {
+      groups.set(f.fieldNumber, []);
+      order.push(f.fieldNumber);
+    }
+    groups.get(f.fieldNumber).push(f.value);
+  }
+  const obj = {};
+  for (const num of order) {
+    const values = groups.get(num).map(genericValueToPlain);
+    obj[`#${num}`] = values.length === 1 ? values[0] : values;
+  }
+  return obj;
+}
+
+// Basic JSON syntax highlighting (regex-based, same approach devtools/most
+// JSON viewers use) — operates on already-stringified, HTML-escaped JSON.
+function syntaxHighlightJson(json) {
+  const escaped = escapeHtml(json);
+  return escaped.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    (match) => {
+      let cls = "json-number";
+      if (/^"/.test(match)) {
+        cls = /:$/.test(match) ? "json-key" : "json-string";
+      } else if (/^(true|false)$/.test(match)) {
+        cls = "json-boolean";
+      } else if (match === "null") {
+        cls = "json-null";
+      }
+      return `<span class="${cls}">${match}</span>`;
+    },
+  );
+}
+
+function renderAsJson(obj) {
+  const json = JSON.stringify(obj, null, 2);
+  return `<pre class="json-view">${syntaxHighlightJson(json)}</pre>`;
+}
+
 // ---- Schema-aware rendering (used once a .proto is loaded and matches) ----
 
 function namedPreview(value, depth) {
@@ -381,27 +515,11 @@ function renderObjectTree(obj, depth) {
   return keys.map((k) => renderNamedField(k, obj[k], depth)).join("");
 }
 
-// Tries to decode a message frame's raw bytes against the resolved schema
-// type for this call. Returns rendered HTML, or null if there's no schema
-// match / decoding fails, so the caller can fall back to the generic view.
-function tryRenderWithSchema(frame, schemaInfo) {
-  if (!schemaInfo || !schemaInfo.responseType || frame.compressed) return null;
-  try {
-    const bytes = base64ToBytes(frame.bytesBase64);
-    const message = schemaInfo.responseType.decode(bytes);
-    const obj = schemaInfo.responseType.toObject(message, {
-      longs: "string",
-      enums: "string",
-      bytes: "base64",
-      defaults: false,
-    });
-    return `<div class="field-tree">${renderObjectTree(obj)}</div>`;
-  } catch (e) {
-    return null;
-  }
-}
-
-function renderFrame(frame, index, schemaInfo) {
+// decodeResult comes from the sandbox's "decode" command:
+// { hasType: false }                                  — no schema/type to try
+// { hasType: true, value, typeFullName }               — decoded successfully
+// { hasType: true, error, typeFullName }               — type existed, decode threw
+function renderFrame(frame, index, decodeResult) {
   if (frame.type === "trailer") {
     const trailerRows = Object.entries(frame.trailers)
       .map(([k, v]) => `<div>${escapeHtml(k)}: ${escapeHtml(v)}</div>`)
@@ -421,24 +539,32 @@ function renderFrame(frame, index, schemaInfo) {
       </div>
     `;
   }
-  // message frame — prefer the schema-decoded view when a .proto matched
+
+  // message frame — prefer the schema-decoded object when a .proto matched
+  // and actually decoded, otherwise fall back to the schema-less generic
+  // decode (surfacing why the schema attempt failed, if it was tried).
+  const usedSchema = !!(decodeResult && decodeResult.hasType && "value" in decodeResult);
+  const schemaError = decodeResult && decodeResult.hasType && decodeResult.error;
+  const plainObj = usedSchema ? decodeResult.value : frame.decodeError ? null : genericFieldsToPlain(frame.decoded);
+
   let body;
-  let usedSchema = false;
-  const schemaHtml = tryRenderWithSchema(frame, schemaInfo);
-  if (schemaHtml !== null) {
-    body = schemaHtml;
-    usedSchema = true;
-  } else if (frame.decodeError) {
+  if (plainObj === null) {
     body = `<div class="decode-error">${escapeHtml(frame.decodeError)}</div><div class="raw-b64">${frame.bytesBase64}</div>`;
+  } else if (viewMode === "json") {
+    body = renderAsJson(plainObj);
+  } else if (usedSchema) {
+    body = `<div class="field-tree">${renderObjectTree(plainObj)}</div>`;
   } else {
     body = `<div class="field-tree">${renderFieldTree(frame.decoded)}</div>`;
   }
+
   return `
     <div class="frame">
       <div class="frame-header">
         <span class="frame-type">MESSAGE ${index + 1}</span>
         <span>${frame.byteLength} bytes</span>
-        ${usedSchema ? `<span class="schema-badge">${escapeHtml(schemaInfo.responseType.fullName.replace(/^\./, ""))}</span>` : ""}
+        ${usedSchema ? `<span class="schema-badge">${escapeHtml(decodeResult.typeFullName)}</span>` : ""}
+        ${schemaError ? `<span style="color:var(--warn)" title="${escapeHtml(schemaError)}">schema decode failed</span>` : ""}
         ${frame.compressed ? '<span style="color:var(--warn)">compressed</span>' : ""}
       </div>
       <div class="frame-body">${body}</div>
@@ -446,23 +572,139 @@ function renderFrame(frame, index, schemaInfo) {
   `;
 }
 
-function renderDetail(call) {
+// Same "schema decode, else generic decode, else surface the error" logic as
+// renderFrame's body, but returning a plain JSON-able value instead of HTML —
+// used to build the single combined request/response JSON blob below.
+function frameToPlainOrError(frame, decodeResult) {
+  if (decodeResult && decodeResult.hasType && "value" in decodeResult) return decodeResult.value;
+  const plain = frame.decodeError ? { __decodeError: frame.decodeError } : genericFieldsToPlain(frame.decoded);
+  if (decodeResult && decodeResult.hasType && decodeResult.error) plain.__schemaError = decodeResult.error;
+  return plain;
+}
+
+// decodeResults must be the same length/order as frames (see decodeFrames
+// below) so each message frame lines up with its precomputed decode result.
+function messagesToPlain(frames, decodeResults) {
+  const out = [];
+  (frames || []).forEach((f, i) => {
+    if (f.type !== "message") return;
+    out.push(frameToPlainOrError(f, decodeResults[i]));
+  });
+  return out;
+}
+
+// gRPC-Web URLs look like https://host/package.Service/MethodName — used as
+// a method label when no .proto is loaded to resolve a nicer one.
+function methodNameFromUrl(url) {
+  try {
+    const parts = new URL(url).pathname.split("/").filter(Boolean);
+    return parts.slice(-2).join("/") || url;
+  } catch (e) {
+    return url;
+  }
+}
+
+// Builds the { method, request, response } shape for the combined JSON view —
+// one message collapses to an object, several (streaming) become an array.
+function buildCombinedJson(call, schemaInfo, requestDecoded, responseDecoded) {
+  const obj = {
+    method: schemaInfo ? `${schemaInfo.serviceName}/${schemaInfo.methodName}` : methodNameFromUrl(call.url),
+  };
+
+  const reqMessages = messagesToPlain(call.requestFrames, requestDecoded);
+  if (reqMessages.length) obj.request = reqMessages.length === 1 ? reqMessages[0] : reqMessages;
+
+  const resMessages = messagesToPlain(call.frames, responseDecoded);
+  if (resMessages.length) obj.response = resMessages.length === 1 ? resMessages[0] : resMessages;
+
+  const trailer = (call.frames || []).find((f) => f.type === "trailer");
+  if (trailer) {
+    const status = {};
+    if (trailer.trailers["grpc-status"] !== undefined) status.code = trailer.trailers["grpc-status"];
+    if (trailer.trailers["grpc-message"] !== undefined) status.message = trailer.trailers["grpc-message"];
+    if (Object.keys(status).length) obj.status = status;
+  }
+
+  const reqParseErrors = (call.requestFrames || []).filter((f) => f.type === "error").map((f) => f.message);
+  if (reqParseErrors.length) obj.requestParseErrors = reqParseErrors;
+  const resParseErrors = (call.frames || []).filter((f) => f.type === "error").map((f) => f.message);
+  if (resParseErrors.length) obj.responseParseErrors = resParseErrors;
+
+  return obj;
+}
+
+// Requests a schema decode for every "message" frame in `frames` from the
+// sandbox, in parallel. Keeps the same length/order as `frames` (with `null`
+// for non-message frames) so results line up by index with the source array.
+async function decodeFrames(frames, url, direction) {
+  return Promise.all(
+    (frames || []).map((f) => {
+      if (f.type !== "message") return null;
+      return callSandbox("decode", { url, direction, bytesBase64: f.bytesBase64 }).catch((e) => ({
+        hasType: true,
+        error: e.message,
+      }));
+    }),
+  );
+}
+
+// Bumped on every renderDetail call so a slow, now-stale in-flight render
+// (e.g. the user clicked a different call while sandbox round-trips were
+// still pending) doesn't clobber a newer selection's HTML when it resolves.
+let renderGeneration = 0;
+
+async function renderDetail(call) {
   if (!call) {
     detailEl.innerHTML = `<div id="empty-state">Select a call to inspect its frames.</div>`;
     return;
   }
 
+  const myGeneration = ++renderGeneration;
+
+  const requestFrames = call.requestFrames || [];
+  const requestMessageFrames = requestFrames.filter((f) => f.type === "message");
+  const requestErrorFrames = requestFrames.filter((f) => f.type === "error");
+
   const messageFrames = call.frames.filter((f) => f.type === "message");
   const trailerFrames = call.frames.filter((f) => f.type === "trailer");
   const errorFrames = call.frames.filter((f) => f.type === "error");
-  const schemaInfo = resolveMethodForUrl(call.url);
+
+  let methodInfo = null;
+  try {
+    methodInfo = await callSandbox("resolveMethod", { url: call.url });
+  } catch (e) {
+    methodInfo = null;
+  }
+  const schemaInfo =
+    methodInfo && methodInfo.matched ? { serviceName: methodInfo.serviceName, methodName: methodInfo.methodName } : null;
+
+  const [requestDecoded, responseDecoded] = await Promise.all([
+    decodeFrames(requestFrames, call.url, "request"),
+    decodeFrames(call.frames, call.url, "response"),
+  ]);
+
+  if (myGeneration !== renderGeneration) return; // a newer call was selected meanwhile
 
   let schemaStatusHtml = "";
-  if (protoRoot) {
-    schemaStatusHtml = schemaInfo
-      ? `<div class="schema-status ok">Decoding with schema: <code>${escapeHtml(schemaInfo.serviceName)}/${escapeHtml(schemaInfo.methodName)}</code></div>`
+  if (methodInfo && methodInfo.loaded) {
+    schemaStatusHtml = methodInfo.matched
+      ? `<div class="schema-status ok">Decoding with schema: <code>${escapeHtml(methodInfo.serviceName)}/${escapeHtml(methodInfo.methodName)}</code></div>`
       : `<div class="schema-status warn">No matching service/method found in the loaded .proto for this URL — showing raw field numbers.</div>`;
   }
+
+  const framesHtml =
+    viewMode === "json"
+      ? `<div class="section"><div class="section-title">JSON</div>${renderAsJson(buildCombinedJson(call, schemaInfo, requestDecoded, responseDecoded))}</div>`
+      : `
+    <div class="section">
+      <div class="section-title">Request (${requestMessageFrames.length} message${requestMessageFrames.length === 1 ? "" : "s"}${requestErrorFrames.length ? `, ${requestErrorFrames.length} error` : ""})</div>
+      ${requestFrames.length ? requestFrames.map((f, i) => renderFrame(f, i, requestDecoded[i])).join("") : "<div class='field-line'>(no request body captured)</div>"}
+    </div>
+
+    <div class="section">
+      <div class="section-title">Response (${messageFrames.length} message${messageFrames.length === 1 ? "" : "s"}, ${trailerFrames.length} trailer${trailerFrames.length === 1 ? "" : "s"}${errorFrames.length ? `, ${errorFrames.length} error` : ""})</div>
+      ${call.frames.map((f, i) => renderFrame(f, i, responseDecoded[i])).join("")}
+    </div>`;
 
   detailEl.innerHTML = `
     <h1 class="call-title">${escapeHtml(call.httpMethod)} ${escapeHtml(call.url)}</h1>
@@ -479,9 +721,6 @@ function renderDetail(call) {
       ${renderHeadersTable(call.responseHeaders)}
     </div>
 
-    <div class="section">
-      <div class="section-title">Frames (${messageFrames.length} message${messageFrames.length === 1 ? "" : "s"}, ${trailerFrames.length} trailer${trailerFrames.length === 1 ? "" : "s"}${errorFrames.length ? `, ${errorFrames.length} error` : ""})</div>
-      ${call.frames.map((f, i) => renderFrame(f, i, schemaInfo)).join("")}
-    </div>
+    ${framesHtml}
   `;
 }
