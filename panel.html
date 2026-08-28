@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -8,10 +8,16 @@
     <div id="toolbar">
       <span id="status" class="status">Attaching…</span>
       <div class="spacer"></div>
+      <label class="filter-label proto-loader" for="proto-file">
+        <input type="file" id="proto-file" accept=".proto" style="display: none" />
+        <span id="proto-label">Load .proto</span>
+      </label>
       <label class="filter-label">
         <input type="checkbox" id="autoscroll" checked />
         Autoscroll
       </label>
+      <button id="expand-btn">Expand all</button>
+      <button id="collapse-btn">Collapse all</button>
       <button id="clear-btn">Clear</button>
     </div>
 
@@ -22,6 +28,7 @@
       </div>
     </div>
 
+    <script src="vendor/protobuf.min.js"></script>
     <script src="panel.js"></script>
   </body>
 </html>

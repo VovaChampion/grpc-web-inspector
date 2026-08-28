@@ -219,11 +219,10 @@ h1.call-title {
 .field-tree {
   font-family: var(--mono);
   font-size: 11px;
-  white-space: pre-wrap;
 }
 
 .field-line {
-  padding: 1px 0;
+  padding: 2px 0;
 }
 .field-num {
   color: var(--text-dim);
@@ -232,9 +231,76 @@ h1.call-title {
   color: var(--accent-dim);
 }
 .field-nested {
-  margin-left: 16px;
+  margin-left: 14px;
   border-left: 1px dashed var(--border);
   padding-left: 8px;
+  margin-top: 2px;
+}
+
+details.field-details {
+  margin: 1px 0;
+}
+details.field-details > summary.field-summary {
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  list-style: revert;
+}
+details.field-details > summary.field-summary:hover {
+  background: var(--bg-hover);
+}
+details.field-details > summary.field-summary::marker {
+  color: var(--accent-dim);
+}
+
+.preview {
+  color: var(--text-dim);
+  font-style: italic;
+  font-family: var(--sans);
+  margin-left: 4px;
+}
+
+.repeat-badge {
+  background: var(--bg-raised);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+.schema-badge {
+  background: var(--bg-raised);
+  color: var(--accent);
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-family: var(--sans);
+}
+
+.schema-status {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.schema-status.ok {
+  background: #1f4d3d;
+  color: var(--accent);
+}
+.schema-status.warn {
+  background: #4d4423;
+  color: var(--warn);
+}
+
+.proto-loader {
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+  padding: 3px 8px !important;
+}
+.proto-loader:hover {
+  border-color: var(--accent-dim);
 }
 
 .raw-b64 {

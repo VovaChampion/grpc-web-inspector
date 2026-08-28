@@ -80,8 +80,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       const entry = store.get(params.requestId);
       if (!entry) return;
       const headers = params.response.headers || {};
-      const contentType =
-        headers["content-type"] || headers["Content-Type"] || headers["Content-type"] || "";
+      const contentType = headers["content-type"] || headers["Content-Type"] || headers["Content-type"] || "";
       entry.contentType = contentType;
       entry.status = params.response.status;
       entry.responseHeaders = headers;
@@ -97,56 +96,51 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         return;
       }
 
-      chrome.debugger.sendCommand(
-        { tabId },
-        "Network.getResponseBody",
-        { requestId: params.requestId },
-        (result) => {
-          store.delete(params.requestId);
-          if (chrome.runtime.lastError || !result) {
-            console.warn(
-              "[gRPC-Web Inspector] getResponseBody failed:",
-              chrome.runtime.lastError && chrome.runtime.lastError.message
-            );
-            return;
-          }
-
-          let bytes;
-          try {
-            if (result.base64Encoded) {
-              const binary = atob(result.body);
-              bytes = new Uint8Array(binary.length);
-              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-            } else {
-              bytes = new TextEncoder().encode(result.body);
-            }
-          } catch (e) {
-            return;
-          }
-
-          let frames;
-          try {
-            frames = GrpcWebDecoder.parseFrames(bytes);
-          } catch (e) {
-            frames = [{ type: "error", message: e.message }];
-          }
-
-          notifyPanel(tabId, {
-            type: "grpc-call",
-            call: {
-              requestId: entry.requestId,
-              url: entry.url,
-              httpMethod: entry.httpMethod,
-              status: entry.status,
-              contentType: entry.contentType,
-              requestHeaders: entry.requestHeaders,
-              responseHeaders: entry.responseHeaders,
-              frames,
-              time: entry.wallTime,
-            },
-          });
+      chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId: params.requestId }, (result) => {
+        store.delete(params.requestId);
+        if (chrome.runtime.lastError || !result) {
+          console.warn(
+            "[gRPC-Web Inspector] getResponseBody failed:",
+            chrome.runtime.lastError && chrome.runtime.lastError.message,
+          );
+          return;
         }
-      );
+
+        let bytes;
+        try {
+          if (result.base64Encoded) {
+            const binary = atob(result.body);
+            bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          } else {
+            bytes = new TextEncoder().encode(result.body);
+          }
+        } catch (e) {
+          return;
+        }
+
+        let frames;
+        try {
+          frames = GrpcWebDecoder.parseFrames(bytes);
+        } catch (e) {
+          frames = [{ type: "error", message: e.message }];
+        }
+
+        notifyPanel(tabId, {
+          type: "grpc-call",
+          call: {
+            requestId: entry.requestId,
+            url: entry.url,
+            httpMethod: entry.httpMethod,
+            status: entry.status,
+            contentType: entry.contentType,
+            requestHeaders: entry.requestHeaders,
+            responseHeaders: entry.responseHeaders,
+            frames,
+            time: entry.wallTime,
+          },
+        });
+      });
       break;
     }
 

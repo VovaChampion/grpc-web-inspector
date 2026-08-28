@@ -35,10 +35,7 @@ const GrpcWebDecoder = (function () {
 
       const flag = bytes[offset];
       const length =
-        (bytes[offset + 1] << 24) |
-        (bytes[offset + 2] << 16) |
-        (bytes[offset + 3] << 8) |
-        bytes[offset + 4];
+        (bytes[offset + 1] << 24) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 8) | bytes[offset + 4];
       offset += 5;
 
       if (length < 0 || offset + length > bytes.length) {
